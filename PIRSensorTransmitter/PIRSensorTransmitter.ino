@@ -1,5 +1,5 @@
 /*
-Wireless PIR sensor firmware
+Wireless PIR sensor Transmitter firmware
  revision 1.0
  Copyright (c) 2014, Andrey Shigapov, All rights reserved
  This program is free software; you can redistribute it and/or
@@ -34,11 +34,15 @@ Wireless PIR sensor firmware
 #include "RF24.h"
 #include "printf.h"
 
+#define VERSION    0.5 //version
+#define ENABLE_SERIAL //enable the debug 
+
 #define NODEID     101 //unique for each node on same network
 #define NETWORKID  101 //the same on all nodes that talk to each other
 #define GATEWAYID    1
-#define ENABLE_SERIAL //enable the debug 
+// 
 #define PIR_DISABLE_INTERVAL 1
+// Photo cell
 #define PHOTO_CELL_PIN 0   // Analog I/O pin for photo cell input
 #define PHOTO_CELL_POWER A2 // Analog I/O pin for photo cell power
 #define LIGHT_THRESHOLD_PIN A1 // Analog I/O pin to set the light threshold
@@ -48,23 +52,26 @@ typedef struct {
   int nodeID;             //node ID (1xx, 2xx, 3xx); 1xx = hall, 2xx = main floor, 3xx = outside
   int deviceID;           //sensor ID (2, 3, 4, 5)
   unsigned long var1_usl; //uptime in msecs
-  float var2_float;       //could contain sensor data
-  float var3_float;       //could contain more sensor data
+  float var2_float;       //may contain sensor data
+  float var3_float;       //may contain more sensor data
 } Payload;
 Payload sensorData;
 
-int led = A3; // the pin that the LED is attached to
-int PIR_input = 2; // the pin that connected to PIT output
-int ledRx = led;
-int ledTx = led;
-unsigned int pir_disable_counter = 0;
-unsigned int pir_enable_counter = 0;
+#define STATUS_LED A3 // the pin that the LED is attached to
+#define PIR_INPUT 2 // the pin that is connected to PIT output
+
+#define ledRx STATUS_LED //for now is the same as status
+#define ledTx STATUS_LED //for now is the same as status
+uint8_t pir_disable_counter = 1;  //disable the sensor for the first 8 sec, let all transition precesses to settle down
+uint8_t pir_enable_counter = 0;
+
 // Set up nRF24L01 radio on SPI bus plus pins 9 & 10
 RF24 radio(9,10);
 // Radio pipe addresses for the 2 nodes to communicate.
 const uint64_t pipes[2] = { 0xE7E7E7E700LL, 0xE7E7E7E700LL }; // !!! DO NOT THIS COMMIT VALUE !!!
-char dataToSend = 'z';
-char dataRecv = 'z';
+
+uint8_t dataToSend = 0;
+uint8_t dataSent = 0;
 uint16_t lightThreshold = 0;
 
 //timings
@@ -78,6 +85,7 @@ void openPipes()
   radio.openWritingPipe(txPipe);
   radio.openReadingPipe(1, rxPipe);
 }
+
 /////////////////////////////////////////////////////////////////
 // Returns: Nothing.
 // Parameters: None.
@@ -87,12 +95,11 @@ void openPipes()
 // it disables the PIR sensor for several WDT intervals
 // in order to conserve the energy
 /////////////////////////////////////////////////////////////////
-void processPIR()
+ISR(PIR_vect)
 {
   if(pir_disable_counter == pir_enable_counter) {
     pir_disable_counter += PIR_DISABLE_INTERVAL;
-    dataToSend = 'o';
-    dataRecv = 'z';
+    dataToSend++; 
   }
 }
 /////////////////////////////////////////////////////////////////
@@ -115,7 +122,7 @@ ISR(WDT_vect)
 //
 // Description: Enters the arduino into sleep mode.
 /////////////////////////////////////////////////////////////////
-void enterSleep(void)
+void PowerDownSleep(void)
 {
   set_sleep_mode(SLEEP_MODE_PWR_DOWN); /* EDIT: could also use SLEEP_MODE_PWR_DOWN for lowest power consumption. */
   sleep_enable();
@@ -156,8 +163,10 @@ uint16_t readLightLevel() {
   digitalWrite(PHOTO_CELL_POWER, HIGH);
   delay(10);
   Result = 1024 - analogRead(PHOTO_CELL_PIN);
-    Serial.print("Current light level: ");
-  Serial.println(Result);
+#ifndef ENABLE_SERIAL
+  Serial.println("Current light level: ");
+  Serial.print(Result);
+#endif //#ifndef ENABLE_SERIAL
   // Setup the photo cell pins as input pins
   pinMode(PHOTO_CELL_POWER, INPUT);
   // Activate internal pull-down
@@ -169,12 +178,13 @@ uint16_t readLightLevel() {
 // the setup routine runs once when you press reset:
 void setup() {  
 #ifdef ENABLE_SERIAL
-  Serial.begin(57600);
+  Serial.begin(115200);
   printf_begin();
   Serial.println("");
   Serial.println("=====================================");
-  Serial.println("PIR Motion Sensor v0.4");
+  Serial.println("PIR Sensor Transmitter v0.5");
   Serial.println("=====================================");
+  Serial.println("");
 #endif //#ifdef ENABLE_SERIAL
   sensorData.nodeID = NODEID; // this node id should be the same for all devices in this node
   
@@ -182,8 +192,10 @@ void setup() {
   pir_time = millis();
   
   // declare pin 9 to be an output:
-  pinMode(led, OUTPUT);
-  pinMode(PIR_input, INPUT);
+  pinMode(STATUS_LED, OUTPUT);
+  pinMode(PIR_INPUT, INPUT);
+ 
+  digitalWrite(PIR_INPUT, LOW);
   
   // Setup the photo cell pins as input pins
   pinMode(PHOTO_CELL_PIN, OUTPUT);
@@ -237,12 +249,21 @@ void setup() {
   //////////////////////////////////////////////////////////////////////////
   // Setup PIR interrupts
   //////////////////////////////////////////////////////////////////////////
-  attachInterrupt(0, processPIR, FALLING);
+  attachInterrupt(0, PIR_vect, FALLING);
   // attachInterrupt(1, processPIR, RISING);
+  
+#ifdef ENABLE_SERIAL
+  Serial.println("");
+  Serial.println("====================================");
+  Serial.println("Setup complete. PIR Sensor is ready");
+  Serial.println("====================================");
+  Serial.println("");
+  delay(200);
+#endif //#ifdef ENABLE_SERIAL
 }
 // the loop routine runs over and over again forever:
 void loop() {
-  if (dataToSend != dataRecv) {  
+  if (dataToSend != dataSent) {  
     pir_time = millis();
     sensorData.deviceID = 2;
     sensorData.var1_usl = millis();
@@ -289,16 +310,20 @@ void loop() {
     radio.stopListening();
     delay(200);
     radio.powerDown();
-    dataToSend = dataRecv = 'z';
+     dataSent = dataToSend;
   } 
   else {
 #ifdef ENABLE_SERIAL
     printf("\r\nSleeping...");
     delay(100);
 #endif //#ifdef ENABLE_SERIAL
-    // set sleep mode
-    enterSleep();
-    //enable/disable PIR
+
+    //power down the sensor till next interrupt
+    PowerDownSleep();
+   
+#ifdef ENABLE_SERIAL
+  Serial.println("woke up");
+#endif //#ifdef ENABLE_SERIAL
   }
 }
 
